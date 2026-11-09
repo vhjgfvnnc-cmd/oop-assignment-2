@@ -1,0 +1,391 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cmath>
+
+namespace vole {
+
+class Instruction {
+private:
+    unsigned short raw;
+    int opcode, first, second, third;
+
+public:
+    Instruction() : raw(0), opcode(0), first(0), second(0), third(0) {}
+
+    void set(int rawCode, int operation, int a, int b, int c) {
+        raw = static_cast<unsigned short>(rawCode);
+        opcode = operation;
+        first = a;
+        second = b;
+        third = c;
+    }
+
+    unsigned short getRaw() const { return raw; }
+    int getOpcode() const { return opcode; }
+    int getFirst() const { return first; }
+    int getSecond() const { return second; }
+    int getThird() const { return third; }
+};
+
+class InstructionDecoder {
+private:
+    int hexValue(char ch) const {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        return -1;
+    }
+
+public:
+    bool decode(int rawCode, Instruction& instruction) const {
+        if (rawCode < 0 || rawCode > 0xFFFF) return false;
+
+        int opcode = (rawCode >> 12) & 0xF;
+        int first  = (rawCode >> 8) & 0xF;
+        int second = (rawCode >> 4) & 0xF;
+        int third  = rawCode & 0xF;
+
+        if (opcode >= 1 && opcode <= 11) {
+            if (opcode == 4 && first != 0) return false;
+            if (opcode == 10 && second != 0) return false;
+
+            instruction.set(rawCode, opcode, first, second, third);
+            return true;
+        }
+
+        if (rawCode == 0xC000) {
+            instruction.set(rawCode, 12, 0, 0, 0);
+            return true;
+        }
+
+        return false;
+    }
+
+    bool decodeHex(const std::string& text, Instruction& instruction) const {
+        if (text.length() != 4) return false;
+
+        int value = 0;
+        for (int i = 0; i < 4; ++i) {
+            int digit = hexValue(text[i]);
+            if (digit < 0) return false;
+            value = value * 16 + digit;
+        }
+
+        return decode(value, instruction);
+    }
+};
+
+class Memory {
+private:
+    unsigned char cells[256];
+
+public:
+    Memory() {
+        for (int i = 0; i < 256; ++i) cells[i] = 0;
+    }
+
+    unsigned char read(int address) const {
+        if (address < 0 || address >= 256) return 0;
+        return cells[address];
+    }
+
+    void write(int address, unsigned char value) {
+        if (address < 0 || address >= 256) return;
+        cells[address] = value;
+
+        if (address == 0xFF) {
+            std::cout << static_cast<int>(value) << std::endl;
+        }
+    }
+
+    bool loadBytes(int startAddress, const std::vector<unsigned char>& bytes) {
+        if (startAddress < 0 || startAddress >= 256) return false;
+        if (bytes.size() > static_cast<std::size_t>(256 - startAddress)) return false;
+
+        for (std::size_t i = 0; i < bytes.size(); ++i) {
+            cells[startAddress + static_cast<int>(i)] = bytes[i];
+        }
+        return true;
+    }
+};
+
+class RegisterFile {
+private:
+    unsigned char registers[16];
+
+public:
+    RegisterFile() {
+        for (int i = 0; i < 16; ++i) registers[i] = 0;
+    }
+
+    unsigned char get(int index) const {
+        if (index < 0 || index >= 16) return 0;
+        return registers[index];
+    }
+
+    bool set(int index, unsigned char value) {
+        if (index < 0 || index >= 16) return false;
+        registers[index] = value;
+        return true;
+    }
+};
+
+class ALU {
+public:
+    static unsigned char addTwoComplement(unsigned char a, unsigned char b) {
+        return static_cast<unsigned char>(a + b);
+    }
+
+    static unsigned char addFloatingPoint(unsigned char a, unsigned char b) {
+        int signA = (a >> 7) & 1;
+        int expA  = (a >> 4) & 0x7;
+        int mantA = a & 0xF;
+
+        int signB = (b >> 7) & 1;
+        int expB  = (b >> 4) & 0x7;
+        int mantB = b & 0xF;
+
+        double valueA = (mantA / 16.0) * std::pow(2.0, expA - 4);
+        double valueB = (mantB / 16.0) * std::pow(2.0, expB - 4);
+
+        if (signA) valueA = -valueA;
+        if (signB) valueB = -valueB;
+
+        double sum = valueA + valueB;
+        if (sum == 0.0) return 0;
+
+        int resultSign = (sum < 0.0) ? 1 : 0;
+        sum = std::fabs(sum);
+
+        int exponent = 4;
+
+        while (sum >= 1.0 && exponent < 7) {
+            sum /= 2.0;
+            ++exponent;
+        }
+
+        while (sum < 0.5 && exponent > 0) {
+            sum *= 2.0;
+            --exponent;
+        }
+
+        int mantissa = static_cast<int>(sum * 16.0 + 0.5);
+
+        if (mantissa >= 16) {
+            if (exponent < 7) {
+                mantissa = 8;
+                ++exponent;
+            } else {
+                mantissa = 15;
+            }
+        }
+
+        if (mantissa > 15) mantissa = 15;
+        if (mantissa < 0) mantissa = 0;
+
+        return static_cast<unsigned char>(
+            (resultSign << 7) | (exponent << 4) | mantissa
+        );
+    }
+
+    static unsigned char bitwiseOr(unsigned char a, unsigned char b) {
+        return static_cast<unsigned char>(a | b);
+    }
+
+    static unsigned char bitwiseAnd(unsigned char a, unsigned char b) {
+        return static_cast<unsigned char>(a & b);
+    }
+
+    static unsigned char bitwiseXor(unsigned char a, unsigned char b) {
+        return static_cast<unsigned char>(a ^ b);
+    }
+
+    static unsigned char rotateRight(unsigned char value, int steps) {
+        steps %= 8;
+        if (steps < 0) steps += 8;
+        if (steps == 0) return value;
+
+        unsigned int v = value;
+        return static_cast<unsigned char>(
+            (v >> steps) | (v << (8 - steps))
+        );
+    }
+};
+
+class Executor {
+public:
+    static void execute(const Instruction& instr,
+                        RegisterFile& registers,
+                        Memory& memory,
+                        int& pc,
+                        bool& halted) {
+        if (halted) return;
+
+        int op = instr.getOpcode();
+        int first = instr.getFirst();
+        int second = instr.getSecond();
+        int third = instr.getThird();
+        int xy = (second << 4) | third;
+
+        switch (op) {
+        case 1:
+            registers.set(first, memory.read(xy));
+            break;
+
+        case 2:
+            registers.set(first, static_cast<unsigned char>(xy));
+            break;
+
+        case 3:
+            memory.write(xy, registers.get(first));
+            break;
+
+        case 4:
+            registers.set(third, registers.get(second));
+            break;
+
+        case 5:
+            registers.set(first,
+                ALU::addTwoComplement(registers.get(second), registers.get(third)));
+            break;
+
+        case 6:
+            registers.set(first,
+                ALU::addFloatingPoint(registers.get(second), registers.get(third)));
+            break;
+
+        case 7:
+            registers.set(first,
+                ALU::bitwiseOr(registers.get(second), registers.get(third)));
+            break;
+
+        case 8:
+            registers.set(first,
+                ALU::bitwiseAnd(registers.get(second), registers.get(third)));
+            break;
+
+        case 9:
+            registers.set(first,
+                ALU::bitwiseXor(registers.get(second), registers.get(third)));
+            break;
+
+        case 10: // AR0X: Rotate register R (first nibble) right by X bits (third nibble).
+            registers.set(first,
+                ALU::rotateRight(registers.get(first), third));
+            break;
+
+        case 11:
+            if (registers.get(first) == registers.get(0)) {
+                pc = xy;
+            }
+            break;
+
+        case 12:
+            halted = true;
+            break;
+
+        default:
+            halted = true;
+            break;
+        }
+    }
+};
+
+class Machine {
+private:
+    Memory memory;
+    RegisterFile registers;
+    InstructionDecoder decoder;
+    int pc;
+    bool halted;
+
+public:
+    Machine() : pc(0), halted(false) {}
+
+    void reset() {
+        memory = Memory();
+        registers = RegisterFile();
+        pc = 0;
+        halted = false;
+    }
+
+    bool loadProgram(const std::vector<std::string>& hexInstructions,
+                     int startAddress = 0) {
+        if (startAddress < 0 || startAddress % 2 != 0 || startAddress >= 256) return false;
+
+        std::vector<unsigned char> bytes;
+        bytes.reserve(hexInstructions.size() * 2);
+
+        for (std::size_t i = 0; i < hexInstructions.size(); ++i) {
+            Instruction instr;
+            if (!decoder.decodeHex(hexInstructions[i], instr)) return false;
+
+            unsigned short raw = instr.getRaw();
+            bytes.push_back(static_cast<unsigned char>((raw >> 8) & 0xFF));
+            bytes.push_back(static_cast<unsigned char>(raw & 0xFF));
+        }
+
+        if (bytes.size() > static_cast<std::size_t>(256 - startAddress)) {
+            return false;
+        }
+
+        reset();
+
+        if (!memory.loadBytes(startAddress, bytes)) return false;
+
+        pc = startAddress;
+        halted = false;
+        return true;
+    }
+
+    void step() {
+        if (halted) return;
+
+        if (pc < 0 || pc > 254) {
+            halted = true;
+            return;
+        }
+
+        unsigned char high = memory.read(pc);
+        unsigned char low = memory.read(pc + 1);
+        int rawCode = (static_cast<int>(high) << 8) | low;
+
+        Instruction instr;
+        if (!decoder.decode(rawCode, instr)) {
+            std::cerr << "Invalid instruction at address " << pc << std::endl;
+            halted = true;
+            return;
+        }
+
+        pc += 2;
+        Executor::execute(instr, registers, memory, pc, halted);
+    }
+
+    void run() {
+        while (!halted) {
+            step();
+        }
+    }
+};
+
+} // namespace vole
+
+int main() {
+    vole::Machine machine;
+
+    std::vector<std::string> program;
+    program.push_back("2105"); // R1 = 5
+    program.push_back("2203"); // R2 = 3
+    program.push_back("5312"); // R3 = R1 + R2
+    program.push_back("33FF"); // memory[FF] = R3 (screen)
+    program.push_back("C000"); // Halt
+
+    if (!machine.loadProgram(program)) {
+        std::cout << "Invalid program" << std::endl;
+        return 1;
+    }
+
+    machine.run();
+    return 0;
+}
